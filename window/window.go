@@ -1,7 +1,6 @@
 package window
 
 import (
-	"errors"
 	"fmt"
 	"github.com/gonutz/w32"
 	"indev-engine/w32api"
@@ -15,8 +14,29 @@ const (
 
 type inputHandler func(w32.HWND, uint32, uintptr, uintptr) (code uintptr, ok bool)
 
-func CreateWindow(width, height int) error {
+type Window interface {
+	Create() error
+	Close() error
+	listenWindowMessages()
+}
 
+type window struct {
+	width    int
+	height   int
+	handle   w32.HWND
+	Finished chan interface{}
+}
+
+func NewWindow(width, height int) *window {
+	return &window{
+		width:    width,
+		height:   height,
+		Finished: make(chan interface{}),
+	}
+}
+
+// Create and Run Windows window
+func (w *window) Create() error {
 	wndClassName, err := syscall.UTF16PtrFromString("InDevWindowClass")
 	if err != nil {
 		return err
@@ -35,58 +55,70 @@ func CreateWindow(width, height int) error {
 	windowSize := w32.RECT{
 		Left:   0,
 		Top:    0,
-		Right:  int32(width),
-		Bottom: int32(height),
+		Right:  int32(w.width),
+		Bottom: int32(w.height),
 	}
-	// NOTE MSDN says you cannot pass WS_OVERLAPPED to this function but it
-	// seems to work (on XP and Windows 8.1 at least) in conjuntion with the
-	// other flags
+
 	if w32.AdjustWindowRect(&windowSize, windowedStyle, false) {
-		width = int(windowSize.Width())
-		height = int(windowSize.Height())
+		w.width = int(windowSize.Width())
+		w.height = int(windowSize.Height())
 	}
 
 	windowClassName, err := syscall.UTF16PtrFromString("InDevWindowClass")
 	if err != nil {
 		return err
 	}
-	window := w32.CreateWindowEx(
+	windowHandle := w32.CreateWindowEx(
 		0,
 		windowClassName,
 		nil,
 		windowedStyle,
 		0,
 		0,
-		width,
-		height,
+		w.width,
+		w.height,
 		0,
 		0,
 		0,
 		nil,
 	)
-	if window == 0 {
-		return errors.New("CreateWindowEx failed")
+	if windowHandle == 0 {
+		return fmt.Errorf("CreateWindowEx failed")
 	}
-	defer w32.DestroyWindow(window)
 
 	if !w32.RegisterRawInputDevices(w32.RAWINPUTDEVICE{
 		UsagePage: 0x01,
 		Usage:     0x06,
-		Target:    window,
+		Target:    windowHandle,
 	}) {
 		return fmt.Errorf("RegisterRawInputDevices failed")
 	}
 
-	var msg w32.MSG
-	w32.PeekMessage(&msg, 0, 0, 0, w32.PM_NOREMOVE)
+	go w.listenWindowMessages()
 
-	for msg.Message != w32.WM_QUIT { // TODO: добавить проверку на главный цикл
-		if w32.PeekMessage(&msg, 0, 0, 0, w32.PM_REMOVE) {
+	return nil
+}
+
+func (w *window) listenWindowMessages() {
+	var msg w32.MSG
+	w32.PeekMessage(&msg, w.handle, 0, 0, w32.PM_NOREMOVE)
+	for msg.Message != w32.WM_QUIT {
+		if w32.PeekMessage(&msg, w.handle, 0, 0, w32.PM_REMOVE) {
 			w32.TranslateMessage(&msg)
 			w32.DispatchMessage(&msg)
 		}
 	}
+	close(w.Finished)
+}
 
+// TODO привязать все хендлеры к окну и вызывать процедуру Сlose из них
+// Close window Handle (use only to manually close window)
+func (w *window) Close() error {
+	ok := w32.DestroyWindow(w.handle)
+	if !ok {
+		return fmt.Errorf("DestroyWindowError")
+	}
+	close(w.Finished)
 	return nil
 }
 
@@ -119,7 +151,7 @@ func handleInput(hwnd w32.HWND, uMsg uint32, wParam, lParam uintptr) (code uintp
 			if down {
 				// NOTE Заглушка на выход
 				if key == KeyQ {
-					w32.PostQuitMessage(0)
+					w32.DestroyWindow(hwnd)
 				}
 			}
 		}
